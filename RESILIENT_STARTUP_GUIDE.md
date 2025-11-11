@@ -14,14 +14,17 @@ Apollo Gateway ahora **tolera el arranque sin microservicios disponibles**. Esto
 ### Opción 1: Docker Compose (Recomendado)
 
 ```bash
-# Copiar el archivo de ejemplo
-cp docker-compose.example.yml docker-compose.yml
+# Ir al directorio raíz de microservicios
+cd D:\SWII\micro_servicios
 
-# Editar variables de entorno si es necesario
-# Asegúrate de cambiar API_KEY_ADMIN y JWT_SECRET en producción
+# Copiar el archivo de ejemplo
+cp apollo-gateway/docker-compose.example.yml docker-compose.resilient.yml
+
+# O usar el docker-compose.yml existente (que ya tiene Apollo Gateway)
+# Solo necesita actualizarse el start-period en el healthcheck a 90s
 
 # Levantar todos los servicios
-docker-compose up -d
+docker-compose -f docker-compose.resilient.yml up -d
 
 # Apollo Gateway empezará a correr inmediatamente
 # Logs:

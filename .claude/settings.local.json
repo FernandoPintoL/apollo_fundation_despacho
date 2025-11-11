@@ -5,7 +5,8 @@
       "Bash(git add:*)",
       "Bash(git commit -m \"$(cat <<''EOF''\nImplement resilient startup for Apollo Gateway\n\nImplement fault-tolerant service discovery that allows Apollo Gateway to:\n- Start and remain running even if microservices are unavailable\n- Continuously poll for service availability (every 10s)\n- Dynamically discover services as they come online\n- No longer crash on missing service definitions\n\nChanges:\n- Add ResilientIntrospectAndCompose wrapper with graceful error handling\n- Improve startup error handling to not exit on service connectivity issues\n- Extend Docker healthcheck start-period to 90s with /health endpoint\n- Add comprehensive monitoring endpoints with schema readiness status\n- Add documentation (RESILIENT_STARTUP_GUIDE.md)\n- Add example docker-compose configuration\n- Add test-resilience.sh script for verification\n\nThis enables flexible service orchestration without complex depends_on conditions.\n\n🤖 Generated with Claude Code\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
       "Bash(git show:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(docker-compose config:*)"
     ],
     "deny": [],
     "ask": []

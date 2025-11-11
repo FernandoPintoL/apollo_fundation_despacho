@@ -1,0 +1,114 @@
+version: '3.8'
+
+services:
+  # Apollo Gateway - Startup Resiliente
+  # Nota: NO necesita depend_on ni condition service_healthy
+  # Se levanta independientemente y descubre servicios conforme están listos
+  apollo-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "4000:4000"
+    environment:
+      NODE_ENV: development
+      DEBUG: "false"
+      PORT: 4000
+
+      # Habilitar servicios
+      ENABLED_SERVICES: despacho,autentificacion
+
+      # URLs de los microservicios
+      MS_DESPACHO_URL: http://despacho:8001/graphql
+      MS_AUTENTIFICACION_URL: http://autentificacion:8000/graphql
+
+      # Configuración de seguridad
+      API_KEY_ADMIN: admin-key-change-in-production
+      JWT_SECRET: jwt-secret-change-in-production
+
+    # NO necesita depend_on porque es resiliente
+    # Puede arrancar sin que los servicios estén listos
+
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:4000/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s  # Espera 90s antes de validar health
+
+    restart: unless-stopped
+    networks:
+      - swii-network
+
+  # Microservicio: Despacho
+  despacho:
+    build:
+      context: ../microservices/despacho  # Ajusta la ruta según tu estructura
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      NODE_ENV: development
+      PORT: 8001
+      DATABASE_URL: postgresql://user:password@despacho-db:5432/despacho
+    depends_on:
+      - despacho-db
+    restart: unless-stopped
+    networks:
+      - swii-network
+    # Note: No depends_on en apollo-gateway
+
+  despacho-db:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: despacho
+    volumes:
+      - despacho-db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - swii-network
+
+  # Microservicio: Autentificación
+  autentificacion:
+    build:
+      context: ../microservices/autentificacion
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      NODE_ENV: development
+      PORT: 8000
+      DATABASE_URL: postgresql://user:password@auth-db:5432/auth
+      JWT_SECRET: jwt-secret-change-in-production
+    depends_on:
+      - auth-db
+    restart: unless-stopped
+    networks:
+      - swii-network
+    # Note: No depends_on en apollo-gateway
+
+  auth-db:
+    image: postgres:15-alpine
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: auth
+    volumes:
+      - auth-db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - swii-network
+
+networks:
+  swii-network:
+    driver: bridge
+
+volumes:
+  despacho-db-data:
+  auth-db-data:

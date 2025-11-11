@@ -6,9 +6,10 @@ const getSubgraphURL = (envVar, defaultUrl) => {
     return process.env[envVar] || defaultUrl;
 };
 // Only include services that are explicitly enabled
+// In development mode, services can be added without being immediately available
 const enabledServices = process.env.ENABLED_SERVICES
-    ? process.env.ENABLED_SERVICES.split(',').map(s => s.trim())
-    : ['despacho']; // Default to just despacho for local testing
+    ? process.env.ENABLED_SERVICES.split(',').map(s => s.trim()).filter(s => s)
+    : []; // Default to no services - they will connect when available
 export const SUBGRAPH_CONFIG = [
     ...(enabledServices.includes('autentificacion') ? [{
             name: 'autentificacion',

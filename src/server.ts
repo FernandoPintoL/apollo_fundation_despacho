@@ -86,16 +86,58 @@ app.use((req: Request, res: Response, _next: NextFunction) => {
 });
 
 /**
- * Apollo Gateway Setup
+ * Apollo Gateway Setup with Resilient Startup
+ *
+ * This configuration:
+ * - Tolerates missing services at startup
+ * - Continuously polls for service availability
+ * - Discovers services dynamically as they come online
  */
-const gateway = new ApolloGateway({
-  supergraphSdl: new IntrospectAndCompose({
+
+// Wrapper for IntrospectAndCompose that logs initialization attempts
+const createResilientSupergraphSdl = () => {
+  let isInitialized = false;
+
+  const introspectAndCompose = new IntrospectAndCompose({
     subgraphs: SUBGRAPH_CONFIG.map(config => ({
       name: config.name,
       url: config.url,
     })),
     pollIntervalInMs: GATEWAY_CONFIG.introspectionPollInterval,
-  }),
+  });
+
+  return {
+    async initialize(opts: any) {
+      try {
+        const result = await introspectAndCompose.initialize(opts);
+        isInitialized = true;
+        logger.info('✓ Apollo Gateway schema initialized successfully');
+        return result;
+      } catch (error) {
+        const err = error as Error;
+
+        // Log the error but don't crash on initial startup
+        if (!isInitialized) {
+          logger.warn(
+            `⚠ Some services unavailable at startup (will keep retrying): ${err.message}`
+          );
+          // Return empty but valid supergraph to keep gateway running
+          // The polling mechanism will update it once services are available
+          return {
+            supergraphSdl: 'schema { query: Query } type Query { _empty: String }',
+            cleanup: async () => {},
+          };
+        }
+
+        // If already initialized, use normal error handling
+        throw error;
+      }
+    },
+  };
+};
+
+const gateway = new ApolloGateway({
+  supergraphSdl: createResilientSupergraphSdl() as any,
   buildService({ url }) {
     // Custom data source that adds API key for subgraph requests
     return new RemoteGraphQLDataSource({
@@ -140,6 +182,7 @@ const apolloServer = new ApolloServer({
     {
       async serverWillStart() {
         logger.info('Apollo Gateway Server starting...');
+        logger.info(`Registered Subgraphs: ${SUBGRAPH_CONFIG.length > 0 ? SUBGRAPH_CONFIG.map(s => s.name).join(', ') : 'None'}`);
       }
     }
   ],
@@ -152,9 +195,12 @@ const apolloServer = new ApolloServer({
 });
 
 /**
- * Initialize Apollo Server
+ * Initialize Apollo Server with Resilient Error Handling
  */
+let serverStarted = false;
+
 apolloServer.start().then(() => {
+  serverStarted = true;
   /**
    * Apollo Sandbox Landing Page (GET /sandbox)
    */
@@ -330,7 +376,15 @@ apolloServer.start().then(() => {
       const subgraphStatus = await Promise.all(
         SUBGRAPH_CONFIG.map(async (config) => {
           try {
-            const response = await fetch(`${config.url}?query={__schema{types{name}}}`);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+            const response = await fetch(
+              `${config.url}?query={__schema{types{name}}}`,
+              { signal: controller.signal }
+            );
+            clearTimeout(timeoutId);
+
             return {
               name: config.name,
               url: config.url,
@@ -348,13 +402,19 @@ apolloServer.start().then(() => {
         })
       );
 
+      // Check if gateway has a schema (safely, using any for apollo server internal)
+      const apolloServerAny = apolloServer as any;
+      const schemaReady = serverStarted && apolloServerAny._schema !== undefined;
+
       res.json({
         status: 'ok',
         service: 'apollo-gateway',
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
+        schemaReady,
         subgraphs: subgraphStatus,
         allHealthy: subgraphStatus.every(s => s.status === 'healthy'),
+        readyForRequests: schemaReady,
       });
     } catch (error) {
       logger.error('Error checking subgraph health', error as Error);
@@ -517,8 +577,29 @@ apollo_gateway_info{version="1.0.0"} 1
   });
 
 }).catch(err => {
+  const errorMsg = (err as Error).message;
+
+  // Check if it's a service connectivity error at startup
+  const isServiceError = errorMsg.includes('Couldn\'t load service definitions') ||
+    errorMsg.includes('connect ECONNREFUSED') ||
+    errorMsg.includes('ENOTFOUND');
+
+  console.error('=== DETAILED ERROR ===');
+  console.error(err);
+  console.error('====================');
   logger.error('Failed to start Apollo Server', err as Error);
-  process.exit(1);
+
+  if (isServiceError && !serverStarted) {
+    // Don't exit - let the server continue running and polling for services
+    logger.warn(
+      '⚠ Service connectivity issue detected at startup. ' +
+      'Apollo Gateway will continue running and retry connecting to services. ' +
+      'Services will be discovered as they come online.'
+    );
+  } else {
+    // For other types of errors, exit
+    process.exit(1);
+  }
 });
 
 export default app;

@@ -10,7 +10,11 @@
       "Bash(timeout 30 npm run build:*)",
       "Bash(timeout 15 npm start)",
       "Bash(timeout 20 npm start)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(docker-compose down:*)",
+      "Bash(docker container prune:*)",
+      "Bash(docker-compose up:*)",
+      "Bash(docker-compose logs:*)"
     ],
     "deny": [],
     "ask": []

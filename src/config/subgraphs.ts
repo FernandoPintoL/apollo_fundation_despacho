@@ -20,44 +20,62 @@ const enabledServices = process.env.ENABLED_SERVICES
   ? process.env.ENABLED_SERVICES.split(',').map(s => s.trim()).filter(s => s)
   : []; // Default to no services - they will connect when available
 
+// Use host.docker.internal when running in Docker to access localhost services
+// This allows Docker containers to access services running on the host machine
+const isRunningInDocker = process.env.RUNNING_IN_DOCKER === 'true';
+const HOST = isRunningInDocker ? 'host.docker.internal' : 'localhost';
+
+// Log configuration for debugging
+console.log('[SUBGRAPH CONFIG]');
+console.log(`  ENABLED_SERVICES env: ${process.env.ENABLED_SERVICES}`);
+console.log(`  Parsed enabled services: ${enabledServices.join(', ') || 'NONE'}`);
+console.log(`  Running in Docker: ${isRunningInDocker}`);
+console.log(`  Host: ${HOST}`);
+
 export const SUBGRAPH_CONFIG: SubgraphConfig[] = [
   ...(enabledServices.includes('autentificacion') ? [{
     name: 'autentificacion',
-    url: getSubgraphURL('MS_AUTENTIFICACION_URL', 'http://localhost:8000/graphql'),
+    url: getSubgraphURL('MS_AUTENTIFICACION_URL', `http://${HOST}:8000/graphql`),
     timeout: 10000,
     retries: 3,
   }] : []),
   ...(enabledServices.includes('despacho') ? [{
     name: 'despacho',
-    url: getSubgraphURL('MS_DESPACHO_URL', 'http://localhost:8001/graphql'),
+    url: getSubgraphURL('MS_DESPACHO_URL', `http://${HOST}:8001/graphql`),
     timeout: 10000,
     retries: 3,
   }] : []),
   ...(enabledServices.includes('recepcion') ? [{
     name: 'recepcion',
-    url: getSubgraphURL('MS_RECEPCION_URL', 'http://localhost:8080/api/graphql'),
+    url: getSubgraphURL('MS_RECEPCION_URL', `http://${HOST}:8080/graphql`),
     timeout: 10000,
     retries: 3,
   }] : []),
   ...(enabledServices.includes('websocket') ? [{
     name: 'websocket',
-    url: getSubgraphURL('MS_WEBSOCKET_URL', 'http://localhost:4004/graphql'),
+    url: getSubgraphURL('MS_WEBSOCKET_URL', `http://${HOST}:4004/graphql`),
     timeout: 10000,
     retries: 3,
   }] : []),
   ...(enabledServices.includes('decision') ? [{
     name: 'decision',
-    url: getSubgraphURL('MS_DECISION_URL', 'http://localhost:8002/graphql'),
+    url: getSubgraphURL('MS_DECISION_URL', `http://${HOST}:8003/graphql`),
     timeout: 10000,
     retries: 3,
   }] : []),
   ...(enabledServices.includes('ml_despacho') ? [{
     name: 'ml_despacho',
-    url: getSubgraphURL('MS_ML_DESPACHO_URL', 'http://localhost:5001/graphql'),
+    url: getSubgraphURL('MS_ML_DESPACHO_URL', `http://${HOST}:5000/graphql`),
     timeout: 10000,
     retries: 3,
   }] : []),
 ];
+
+console.log('[SUBGRAPH CONFIG RESULT]');
+console.log(`  Total services configured: ${SUBGRAPH_CONFIG.length}`);
+SUBGRAPH_CONFIG.forEach(service => {
+  console.log(`    - ${service.name}: ${service.url}`);
+});
 
 /**
  * Gateway Configuration

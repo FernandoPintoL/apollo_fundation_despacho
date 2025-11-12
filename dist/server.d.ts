@@ -9,6 +9,7 @@
  * - Monitors health of all subgraphs
  * - Provides real-time subscriptions support
  */
+import './load-env.js';
 /**
  * Initialize Express Application
  */

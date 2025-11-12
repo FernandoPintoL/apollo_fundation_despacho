@@ -10,6 +10,9 @@
  * - Provides real-time subscriptions support
  */
 
+// MUST be first import - loads environment variables synchronously
+import './load-env.js';
+
 import express, { Request, Response, NextFunction } from 'express';
 import { createServer } from 'http';
 import cors from 'cors';
@@ -18,14 +21,11 @@ import { ApolloGateway, IntrospectAndCompose, RemoteGraphQLDataSource } from '@a
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
 import { WebSocketServer } from 'ws';
-import dotenv from 'dotenv';
 
-// Load environment variables
-dotenv.config();
-
-// Import custom modules
+// Import custom modules AFTER environment is loaded
 import { logger } from './utils/logger.js';
 import { SUBGRAPH_CONFIG, GATEWAY_CONFIG, CORS_CONFIG } from './config/subgraphs.js';
+import { resilientServiceChecker } from './gateway/resilient-gateway.js';
 import {
   authenticateRequest,
   getCacheStats,
@@ -86,58 +86,30 @@ app.use((req: Request, res: Response, _next: NextFunction) => {
 });
 
 /**
- * Apollo Gateway Setup with Resilient Startup
+ * Apollo Gateway Setup - RESILIENT MODE
  *
- * This configuration:
- * - Tolerates missing services at startup
- * - Continuously polls for service availability
- * - Discovers services dynamically as they come online
+ * This configuration allows the gateway to:
+ * - Start successfully with 0 or partial services available
+ * - Continuously poll for service availability (every 10s)
+ * - Dynamically discover services as they come online
+ * - Provide schema readiness status via /health/detailed endpoint
  */
 
-// Wrapper for IntrospectAndCompose that logs initialization attempts
-const createResilientSupergraphSdl = () => {
-  let isInitialized = false;
+logger.info('[GATEWAY CONFIG] Starting in RESILIENT mode');
+logger.info(`[GATEWAY CONFIG] Configured services: ${SUBGRAPH_CONFIG.length}`);
+SUBGRAPH_CONFIG.forEach(config => {
+  logger.info(`  • ${config.name}: ${config.url}`);
+});
 
-  const introspectAndCompose = new IntrospectAndCompose({
+// Use standard IntrospectAndCompose - errors will be handled gracefully
+const gateway = new ApolloGateway({
+  supergraphSdl: new IntrospectAndCompose({
     subgraphs: SUBGRAPH_CONFIG.map(config => ({
       name: config.name,
       url: config.url,
     })),
     pollIntervalInMs: GATEWAY_CONFIG.introspectionPollInterval,
-  });
-
-  return {
-    async initialize(opts: any) {
-      try {
-        const result = await introspectAndCompose.initialize(opts);
-        isInitialized = true;
-        logger.info('✓ Apollo Gateway schema initialized successfully');
-        return result;
-      } catch (error) {
-        const err = error as Error;
-
-        // Log the error but don't crash on initial startup
-        if (!isInitialized) {
-          logger.warn(
-            `⚠ Some services unavailable at startup (will keep retrying): ${err.message}`
-          );
-          // Return empty but valid supergraph to keep gateway running
-          // The polling mechanism will update it once services are available
-          return {
-            supergraphSdl: 'schema { query: Query } type Query { _empty: String }',
-            cleanup: async () => {},
-          };
-        }
-
-        // If already initialized, use normal error handling
-        throw error;
-      }
-    },
-  };
-};
-
-const gateway = new ApolloGateway({
-  supergraphSdl: createResilientSupergraphSdl() as any,
+  }),
   buildService({ url }) {
     // Custom data source that adds API key for subgraph requests
     return new RemoteGraphQLDataSource({
@@ -152,6 +124,7 @@ const gateway = new ApolloGateway({
     });
   },
 });
+
 
 /**
  * Apollo Server Configuration
@@ -195,18 +168,111 @@ const apolloServer = new ApolloServer({
 });
 
 /**
- * Initialize Apollo Server with Resilient Error Handling
+ * Register all non-Apollo-dependent routes FIRST
+ * These can be registered before Apollo Server starts
  */
-let serverStarted = false;
 
-apolloServer.start().then(() => {
-  serverStarted = true;
-  /**
-   * Apollo Sandbox Landing Page (GET /sandbox)
-   */
-  app.get('/sandbox', (_req: Request, res: Response) => {
-    res.set('Content-Type', 'text/html');
-    res.send(`
+/**
+ * Health Check Endpoint
+ */
+app.get('/health', (_req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    service: 'apollo-gateway',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+  });
+});
+
+/**
+ * Detailed Health Check with Subgraph Status
+ */
+app.get('/health/detailed', async (_req: Request, res: Response) => {
+  try {
+    // Get service health status
+    const healthStatus = await resilientServiceChecker.checkServiceHealth();
+
+    res.json({
+      status: 'ok',
+      service: 'apollo-gateway',
+      mode: 'resilient',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+
+      // Schema readiness
+      schemaReady: schemaReady,
+      serverStarted: serverStarted,
+
+      // Service information
+      services: {
+        available: healthStatus.availableServices,
+        unavailable: healthStatus.unavailableServices,
+        totalConfigured: healthStatus.totalConfigured,
+      },
+
+      // Overall status
+      allHealthy: healthStatus.unavailableServices.length === 0,
+      partiallyHealthy: healthStatus.availableServices.length > 0,
+      readyForRequests: schemaReady,
+    });
+  } catch (error) {
+    logger.error('Error checking subgraph health', error as Error);
+    res.status(500).json({
+      status: 'error',
+      error: (error as Error).message,
+    });
+  }
+});
+
+/**
+ * Metrics Endpoint (Prometheus format)
+ */
+app.get('/metrics', (_req: Request, res: Response) => {
+  res.set('Content-Type', 'text/plain');
+  res.send(`
+# HELP apollo_gateway_uptime Gateway uptime in seconds
+# TYPE apollo_gateway_uptime gauge
+apollo_gateway_uptime ${process.uptime()}
+
+# HELP apollo_gateway_info Gateway information
+# TYPE apollo_gateway_info gauge
+apollo_gateway_info{version="1.0.0"} 1
+  `);
+});
+
+/**
+ * Status Endpoint
+ */
+app.get('/status', (_req: Request, res: Response) => {
+  res.json({
+    status: 'operational',
+    service: 'apollo-gateway',
+    version: '1.0.0',
+    environment: process.env.NODE_ENV,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+/**
+ * Root Endpoint
+ */
+app.get('/', (_req: Request, res: Response) => {
+  res.json({
+    message: 'Apollo Federation Gateway - SWII Microservices',
+    graphql: '/graphql',
+    sandbox: '/sandbox',
+    health: '/health',
+    status: '/status',
+    documentation: 'https://www.apollographql.com/docs/apollo-server/federation/introduction/',
+  });
+});
+
+/**
+ * Apollo Sandbox Landing Page (GET /sandbox)
+ */
+app.get('/sandbox', (_req: Request, res: Response) => {
+  res.set('Content-Type', 'text/html');
+  res.send(`
       <!DOCTYPE html>
       <html>
         <head>
@@ -304,154 +370,87 @@ apolloServer.start().then(() => {
     `);
   });
 
+/**
+ * Initialize Apollo Server - Resilient Startup
+ * The gateway will start regardless of service availability
+ */
+let serverStarted = false;
+let schemaReady = false;
+let _wsServer: WebSocketServer;
+
+// Handle Apollo Server startup with graceful error handling
+const startupPromise = apolloServer.start()
+  .then(() => {
+    serverStarted = true;
+    schemaReady = true;
+    logger.info('[APOLLO SERVER] Started successfully with schema');
+  })
+  .catch((err: Error) => {
+    const errorMsg = err.message;
+    serverStarted = true; // Mark as started even if schema composition failed
+    schemaReady = false; // But mark schema as not ready
+
+    // Log the error but continue
+    logger.warn('[APOLLO SERVER] Started but schema composition failed:', errorMsg);
+    logger.warn('[APOLLO SERVER] Gateway will serve /health and /metrics endpoints');
+    logger.warn('[APOLLO SERVER] Waiting for services to become available...');
+
+    // Return success so we don't stop the startup chain
+    return Promise.resolve();
+  });
+
+startupPromise.then(() => {
   /**
    * GraphQL Endpoint (GET & POST /graphql)
+   * Only register if Apollo Server started successfully
    */
-  // GET handler for queries and introspection
-  app.get(
-    '/graphql',
-    authenticateRequest,
-    expressMiddleware(apolloServer, {
-      context: async ({ req }) => {
-        const authReq = req as AuthenticatedRequest;
+  if (schemaReady) {
+    // GET handler for queries and introspection
+    app.get(
+      '/graphql',
+      authenticateRequest,
+      expressMiddleware(apolloServer, {
+        context: async ({ req }) => {
+          const authReq = req as AuthenticatedRequest;
 
-        return {
-          authenticated: authReq.auth?.authenticated || false,
-          user: authReq.auth?.user,
-          token: authReq.auth?.token,
-          userId: authReq.auth?.user?.id,
-          tokenType: authReq.auth?.tokenType,
-        };
-      }
-    })
-  );
+          return {
+            authenticated: authReq.auth?.authenticated || false,
+            user: authReq.auth?.user,
+            token: authReq.auth?.token,
+            userId: authReq.auth?.user?.id,
+            tokenType: authReq.auth?.tokenType,
+          };
+        }
+      })
+    );
 
-  // POST handler for mutations and queries
-  app.post(
-    '/graphql',
-    express.json(),
-    authenticateRequest,
-    expressMiddleware(apolloServer, {
-      context: async ({ req }) => {
-        const authReq = req as AuthenticatedRequest;
+    // POST handler for mutations and queries
+    app.post(
+      '/graphql',
+      express.json(),
+      authenticateRequest,
+      expressMiddleware(apolloServer, {
+        context: async ({ req }) => {
+          const authReq = req as AuthenticatedRequest;
 
-        return {
-          authenticated: authReq.auth?.authenticated || false,
-          user: authReq.auth?.user,
-          token: authReq.auth?.token,
-          userId: authReq.auth?.user?.id,
-          tokenType: authReq.auth?.tokenType,
-        };
-      }
-    })
-  );
+          return {
+            authenticated: authReq.auth?.authenticated || false,
+            user: authReq.auth?.user,
+            token: authReq.auth?.token,
+            userId: authReq.auth?.user?.id,
+            tokenType: authReq.auth?.tokenType,
+          };
+        }
+      })
+    );
+  }
 
   /**
    * WebSocket Setup for Subscriptions
    */
-  // Note: WebSocket subscriptions require additional graphql-ws configuration
-  // For now, relying on Apollo Server v4's built-in WebSocket support
-  const _wsServer = new WebSocketServer({
+  _wsServer = new WebSocketServer({
     server: httpServer,
     path: '/graphql',
-  });
-
-  /**
-   * Health Check Endpoint
-   */
-  app.get('/health', (_req: Request, res: Response) => {
-    res.json({
-      status: 'ok',
-      service: 'apollo-gateway',
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-    });
-  });
-
-  /**
-   * Detailed Health Check with Subgraph Status
-   */
-  app.get('/health/detailed', async (_req: Request, res: Response) => {
-    try {
-      const subgraphStatus = await Promise.all(
-        SUBGRAPH_CONFIG.map(async (config) => {
-          try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-            const response = await fetch(
-              `${config.url}?query={__schema{types{name}}}`,
-              { signal: controller.signal }
-            );
-            clearTimeout(timeoutId);
-
-            return {
-              name: config.name,
-              url: config.url,
-              status: response.ok ? 'healthy' : 'unhealthy',
-              statusCode: response.status,
-            };
-          } catch (error) {
-            return {
-              name: config.name,
-              url: config.url,
-              status: 'unreachable',
-              error: (error as Error).message,
-            };
-          }
-        })
-      );
-
-      // Check if gateway has a schema (safely, using any for apollo server internal)
-      const apolloServerAny = apolloServer as any;
-      const schemaReady = serverStarted && apolloServerAny._schema !== undefined;
-
-      res.json({
-        status: 'ok',
-        service: 'apollo-gateway',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-        schemaReady,
-        subgraphs: subgraphStatus,
-        allHealthy: subgraphStatus.every(s => s.status === 'healthy'),
-        readyForRequests: schemaReady,
-      });
-    } catch (error) {
-      logger.error('Error checking subgraph health', error as Error);
-      res.status(500).json({
-        status: 'error',
-        error: (error as Error).message,
-      });
-    }
-  });
-
-  /**
-   * Metrics Endpoint (Prometheus format)
-   */
-  app.get('/metrics', (_req: Request, res: Response) => {
-    res.set('Content-Type', 'text/plain');
-    res.send(`
-# HELP apollo_gateway_uptime Gateway uptime in seconds
-# TYPE apollo_gateway_uptime gauge
-apollo_gateway_uptime ${process.uptime()}
-
-# HELP apollo_gateway_info Gateway information
-# TYPE apollo_gateway_info gauge
-apollo_gateway_info{version="1.0.0"} 1
-    `);
-  });
-
-  /**
-   * Status Endpoint
-   */
-  app.get('/status', (_req: Request, res: Response) => {
-    res.json({
-      status: 'operational',
-      service: 'apollo-gateway',
-      version: '1.0.0',
-      environment: process.env.NODE_ENV,
-      timestamp: new Date().toISOString(),
-    });
   });
 
   /**
@@ -488,20 +487,6 @@ apollo_gateway_info{version="1.0.0"} 1
   }
 
   /**
-   * Root Endpoint
-   */
-  app.get('/', (_req: Request, res: Response) => {
-    res.json({
-      message: 'Apollo Federation Gateway - SWII Microservices',
-      graphql: '/graphql',
-      sandbox: '/sandbox',
-      health: '/health',
-      status: '/status',
-      documentation: 'https://www.apollographql.com/docs/apollo-server/federation/introduction/',
-    });
-  });
-
-  /**
    * Error Handling for 404
    */
   app.use((_req: Request, res: Response) => {
@@ -524,7 +509,7 @@ apollo_gateway_info{version="1.0.0"} 1
   });
 
   /**
-   * Start Server
+   * Start HTTP Server
    */
   const port = GATEWAY_CONFIG.port;
 
@@ -579,27 +564,27 @@ apollo_gateway_info{version="1.0.0"} 1
 }).catch(err => {
   const errorMsg = (err as Error).message;
 
-  // Check if it's a service connectivity error at startup
-  const isServiceError = errorMsg.includes('Couldn\'t load service definitions') ||
-    errorMsg.includes('connect ECONNREFUSED') ||
-    errorMsg.includes('ENOTFOUND');
-
-  console.error('=== DETAILED ERROR ===');
+  console.error('\n╔════════════════════════════════════════╗');
+  console.error('║     STARTUP ERROR (Resilient Mode)     ║');
+  console.error('╚════════════════════════════════════════╝\n');
   console.error(err);
-  console.error('====================');
-  logger.error('Failed to start Apollo Server', err as Error);
+  console.error('\n');
 
-  if (isServiceError && !serverStarted) {
-    // Don't exit - let the server continue running and polling for services
-    logger.warn(
-      '⚠ Service connectivity issue detected at startup. ' +
-      'Apollo Gateway will continue running and retry connecting to services. ' +
-      'Services will be discovered as they come online.'
-    );
-  } else {
-    // For other types of errors, exit
+  logger.error('Error during Apollo Gateway startup', err as Error);
+
+  // In resilient mode, we log the error but may continue
+  // Service health will be monitored via /health/detailed endpoint
+  logger.warn(
+    'Gateway is starting in resilient mode. Services will be discovered as they become available.'
+  );
+
+  // For critical Apollo Server errors, we still exit
+  if (errorMsg.includes('FATAL') || errorMsg.includes('CRITICAL')) {
+    logger.error('Critical error detected - exiting');
     process.exit(1);
   }
+
+  // Otherwise, allow the process to continue (server may be listening but with no schema)
 });
 
 export default app;

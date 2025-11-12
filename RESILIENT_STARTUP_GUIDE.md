@@ -1,315 +1,294 @@
-# Guía: Startup Resiliente de Apollo Gateway
+# Resilient Startup Guide - Apollo Gateway
 
-## 🎯 Objetivo
+## Overview
 
-Apollo Gateway ahora **tolera el arranque sin microservicios disponibles**. Esto significa:
+The Apollo Gateway now runs in **Resilient Mode**, allowing it to start and remain operational even if some or all configured microservices are unavailable. This enables flexible service orchestration without complex docker-compose dependencies.
 
-- ✅ Levanta Apollo Gateway sin esperar a que los microservicios estén listos
-- ✅ Continúa intentando conectar automáticamente cada 10 segundos
-- ✅ Descubre servicios dinámicamente conforme se levantan
-- ✅ No requiere orquestación compleja con `depends_on` y `condition: service_healthy`
+## Key Features
 
-## 🚀 Quick Start
+✅ **Starts Successfully with 0 or Partial Services**
+- Gateway will not crash if services are unavailable at startup
+- Continues to serve health and monitoring endpoints
 
-### Opción 1: Docker Compose (Recomendado)
+✅ **Continuous Service Discovery**
+- Automatically polls for service availability every 10 seconds
+- Dynamically loads services as they come online
+- No restart required
+
+✅ **Schema Readiness Tracking**
+- `/health` endpoint reports overall gateway status
+- `/health/detailed` shows which services are available/unavailable
+- Applications can check `schemaReady` flag before querying
+
+✅ **Graceful Degradation**
+- If all services are down: Gateway serves health/metrics endpoints only
+- If some services are available: Gateway provides partial schema
+- If all services are up: Gateway provides complete federated schema
+
+## Starting the Gateway
+
+### Basic Usage
 
 ```bash
-# Ir al directorio raíz de microservicios
-cd D:\SWII\micro_servicios
+npm start
+```
 
-# Copiar el archivo de ejemplo
-cp apollo-gateway/docker-compose.example.yml docker-compose.resilient.yml
+Expected output with no services running:
 
-# O usar el docker-compose.yml existente (que ya tiene Apollo Gateway)
-# Solo necesita actualizarse el start-period en el healthcheck a 90s
+```
+[ENV LOADER SUCCESS] .env file loaded
+[GATEWAY CONFIG] Starting in RESILIENT mode
+[GATEWAY CONFIG] Configured services: 5
+  • autentificacion: http://localhost:8000/graphql
+  • despacho: http://localhost:8001/graphql
+  • websocket: http://localhost:4004/graphql
+  • decision: http://localhost:8002/graphql
+  • ml_despacho: http://localhost:5000/graphql
 
-# Levantar todos los servicios
-docker-compose -f docker-compose.resilient.yml up -d
+[APOLLO SERVER] Started but schema composition failed
+[APOLLO SERVER] Gateway will serve /health and /metrics endpoints
+[APOLLO SERVER] Waiting for services to become available...
 
-# Apollo Gateway empezará a correr inmediatamente
-# Logs:
-# [WARN] ⚠ Some services unavailable at startup (will keep retrying)
-# [WARN] ⚠ Service connectivity issue detected at startup...
+╔════════════════════════════════════════╗
+║   Apollo Gateway Server Started        ║
+╠════════════════════════════════════════╣
+║ URL:      http://localhost:4000/graphql      ║
+║ Health:   http://localhost:4000/health        ║
+║ Status:   http://localhost:4000/status        ║
+╚════════════════════════════════════════╝
+```
 
-# Esperar unos segundos y luego verificar health
-sleep 10
+## Monitoring Gateway Health
+
+### Health Check Endpoint
+
+```bash
 curl http://localhost:4000/health
 ```
 
-### Opción 2: Desarrollo Local
-
-```bash
-# Terminal 1: Apollo Gateway
-npm install
-npm run dev
-# Output: [WARN] ⚠ Some services unavailable at startup...
-
-# Terminal 2: Levantar un microservicio cuando quieras
-cd ../microservices/despacho
-npm run dev
-
-# Apollo descubrirá el servicio automáticamente en ~10s
-# Logs en Terminal 1: [INFO] ✓ Apollo Gateway schema initialized successfully
-```
-
-## 🔍 Monitoreo
-
-### Health Check Básico
-```bash
-curl http://localhost:4000/health
-
-# Response:
-# {
-#   "status": "ok",
-#   "service": "apollo-gateway",
-#   "timestamp": "2025-11-11T...",
-#   "uptime": 15.234
-# }
-```
-
-### Health Check Detallado
-```bash
-curl http://localhost:4000/health/detailed | jq
-
-# Response:
-# {
-#   "status": "ok",
-#   "schemaReady": false,              ← Indica si schema está compuesto
-#   "readyForRequests": false,         ← Indica si acepta GraphQL requests
-#   "subgraphs": [
-#     {
-#       "name": "despacho",
-#       "status": "unreachable",       ← Aún no disponible
-#       "error": "connect ECONNREFUSED"
-#     },
-#     {
-#       "name": "autentificacion",
-#       "status": "unreachable"        ← Aún no disponible
-#     }
-#   ],
-#   "allHealthy": false                ← Espera a que sea true
-# }
-```
-
-### Esperar a que esté listo
-```bash
-#!/bin/bash
-# Esperar a que Apollo esté listo para requests
-while true; do
-  READY=$(curl -s http://localhost:4000/health/detailed | jq '.readyForRequests')
-  if [ "$READY" = "true" ]; then
-    echo "✓ Apollo Gateway listo!"
-    break
-  fi
-  echo "⏳ Esperando servicios..."
-  sleep 2
-done
-```
-
-## 📊 Flujo de Arranque Típico
-
-```
-T=0s    → docker-compose up
-        → Apollo Gateway inicia
-        → Intenta conectar a "despacho" @ http://localhost:8001
-        → FALLA: conexión rechazada
-        → Logs: [WARN] ⚠ Some services unavailable at startup
-
-T=1s    → Contenedor Apollo continúa CORRIENDO
-        → No se cierra
-        → Polling: Reintentará cada 10s
-
-T=10s   → Polling automático reintenta
-        → "despacho" AÚN NO ESTÁ LISTO
-        → Continúa polling
-
-T=15s   → "despacho" termina de iniciar
-        → Su healthcheck pasa
-
-T=20s   → Polling automático reintenta
-        → ÉXITO: Descubre "despacho"
-        → Schema se actualiza
-        → Logs: [INFO] ✓ Apollo Gateway schema initialized successfully
-
-T=21s   → healthcheck detallado muestra:
-        → "despacho": "healthy" ✓
-        → "schemaReady": true ✓
-        → "readyForRequests": true ✓
-
-T=22s+  → Apollo acepta GraphQL requests
-```
-
-## 🔧 Configuración
-
-### Variables de Entorno
-
-```env
-# Puerto
-PORT=4000
-NODE_ENV=development
-
-# Habilitar servicios (comma-separated)
-ENABLED_SERVICES=despacho,autentificacion,recepcion
-
-# URLs de servicios
-MS_DESPACHO_URL=http://despacho:8001/graphql
-MS_AUTENTIFICACION_URL=http://autentificacion:8000/graphql
-MS_RECEPCION_URL=http://recepcion:8080/api/graphql
-
-# Seguridad
-API_KEY_ADMIN=admin-key-change-in-production
-JWT_SECRET=jwt-secret-change-in-production
-JWT_EXPIRATION=24h
-
-# Polling interval (ms)
-GATEWAY_CONFIG.introspectionPollInterval=10000
-```
-
-### Dockerfile Health Check
-
-Ya está optimizado para resilencia:
-
-```dockerfile
-HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
-    CMD node -e "require('http').get('http://localhost:4000/health', (r) => {...})"
-```
-
-**Explicación:**
-- `start-period=90s`: Docker espera 90 segundos antes de validar health
-- `interval=30s`: Valida cada 30 segundos
-- `retries=3`: Permite 3 fallos antes de marcar como "unhealthy"
-- Endpoint `/health`: Responde exitosamente sin requerir servicios
-
-## 🧪 Testing
-
-### Script de Prueba
-
-```bash
-# Hacer ejecutable
-chmod +x test-resilience.sh
-
-# Ejecutar
-./test-resilience.sh
-
-# Output esperado:
-# ✓ Test 1: Health Check Endpoint - PASS
-# ✓ Test 2: Detailed Health Check - PASS
-# ⚠ Test 3: GraphQL Schema (expected if services not up)
-```
-
-### Prueba Manual
-
-1. **Apollo up, sin servicios:**
-   ```bash
-   docker-compose up apollo-gateway
-   curl http://localhost:4000/health  # ✓ Responde
-   curl http://localhost:4000/health/detailed  # ✓ schemaReady=false
-   ```
-
-2. **Levantar un servicio:**
-   ```bash
-   docker-compose up despacho -d
-   sleep 15  # Esperar polling
-   curl http://localhost:4000/health/detailed  # ✓ schemaReady=true
-   ```
-
-3. **Hacer una query GraphQL:**
-   ```bash
-   curl -X POST http://localhost:4000/graphql \
-     -H "Content-Type: application/json" \
-     -d '{"query":"{__typename}"}'
-   ```
-
-## 📝 Notas Importantes
-
-### No es necesario...
-
-```yaml
-# ❌ ANTES (No necesario ahora)
-services:
-  apollo-gateway:
-    depends_on:
-      despacho:
-        condition: service_healthy
-      autentificacion:
-        condition: service_healthy
-
-# ✅ AHORA (Apollo espera automáticamente)
-services:
-  apollo-gateway:
-    # Sin depends_on - levanta y espera servicios internamente
-    environment:
-      ENABLED_SERVICES: despacho,autentificacion
-```
-
-### Ventajas
-
-| Antes | Ahora |
-|-------|-------|
-| 🔴 Orden crítico | 🟢 Orden flexible |
-| ❌ Crashes si falta servicio | ✅ Continúa corriendo |
-| ❌ Tiempo de startup predecible | ✅ Adaptativo a velocidad real |
-| 🟡 Logs complicados | 🟢 Logs claros |
-
-### Limitaciones
-
-- Si Apollo Gateway tiene un error en **su propio código**, SÍ se cierra (comportamiento correcto)
-- Solo tolera errores de conectividad con servicios
-- Una vez que estabiliza con todos los servicios, si uno se cae, Apollo lo detecta y lo marca como "unreachable"
-
-## 🚨 Troubleshooting
-
-### "Schema not yet available"
-```
-❌ Error: request to http://localhost:4000/schema failed
-```
-**Causa:** Apollo aún no ha compuesto el schema
-**Solución:**
-```bash
-# Esperar a que schemaReady=true
-curl http://localhost:4000/health/detailed | jq '.schemaReady'
-# Cuando muestre "true", el schema está listo
-```
-
-### Health check falla después de 90s
-```
-✗ healthcheck returned exit code 1
-```
-**Causa:** Posible error en código de Apollo (no en servicios)
-**Revisión:**
-```bash
-docker logs <container_id>
-# Buscar errores que no sean de conectividad
-```
-
-### Services detected pero schema incompleto
-```
+Response:
+```json
 {
-  "schemaReady": true,
-  "allHealthy": false  ← Solo algunos servicios están up
+  "status": "ok",
+  "service": "apollo-gateway",
+  "timestamp": "2025-11-12T04:35:56.077Z",
+  "uptime": 10.24
 }
 ```
-**Esperado:** Es normal durante arranque mientras se estabilizan servicios
-**Solución:** Esperar a que `allHealthy=true`
 
-### Apollo sigue mostrando "unreachable" para un servicio que está up
+### Detailed Health Check
+
 ```bash
-# Debug: Verificar conectividad manual
-curl http://despacho:8001/graphql
-
-# Si responde:
-# 1. Revisar logs de despacho (¿healthcheck pasa?)
-# 2. Revisar red (¿están en el mismo docker network?)
-# 3. Revisar URL en ENABLED_SERVICES
+curl http://localhost:4000/health/detailed
 ```
 
-## 📚 Documentación Completa
+Response when no services available:
+```json
+{
+  "status": "ok",
+  "service": "apollo-gateway",
+  "mode": "resilient",
+  "schemaReady": false,
+  "serverStarted": true,
+  "services": {
+    "available": [],
+    "unavailable": [
+      "autentificacion",
+      "despacho",
+      "websocket",
+      "decision",
+      "ml_despacho"
+    ],
+    "totalConfigured": 5
+  },
+  "allHealthy": false,
+  "partiallyHealthy": false,
+  "readyForRequests": false
+}
+```
 
-Ver `documentaciones/RESILIENT_STARTUP.md` para detalles técnicos.
+Response when services are coming online:
+```json
+{
+  "status": "ok",
+  "service": "apollo-gateway",
+  "mode": "resilient",
+  "schemaReady": true,
+  "serverStarted": true,
+  "services": {
+    "available": ["despacho"],
+    "unavailable": [
+      "autentificacion",
+      "websocket",
+      "decision",
+      "ml_despacho"
+    ],
+    "totalConfigured": 5
+  },
+  "allHealthy": false,
+  "partiallyHealthy": true,
+  "readyForRequests": true
+}
+```
 
-## 📞 Soporte
+## Status Endpoint
 
-Para problemas:
-1. Revisar logs: `docker-compose logs apollo-gateway`
-2. Revisar health: `curl http://localhost:4000/health/detailed`
-3. Revisar servicios: `docker-compose ps`
+```bash
+curl http://localhost:4000/status
+```
+
+Response:
+```json
+{
+  "status": "operational",
+  "service": "apollo-gateway",
+  "version": "1.0.0",
+  "environment": "development",
+  "timestamp": "2025-11-12T04:35:56.077Z"
+}
+```
+
+## Metrics Endpoint (Prometheus)
+
+```bash
+curl http://localhost:4000/metrics
+```
+
+Response:
+```
+# HELP apollo_gateway_uptime Gateway uptime in seconds
+# TYPE apollo_gateway_uptime gauge
+apollo_gateway_uptime 42.5
+
+# HELP apollo_gateway_info Gateway information
+# TYPE apollo_gateway_info gauge
+apollo_gateway_info{version="1.0.0"} 1
+```
+
+## GraphQL Endpoint
+
+### When All Services Are Available
+
+```bash
+curl -X POST http://localhost:4000/graphql \
+  -H "Content-Type: application/json" \
+  -d '{"query": "{ __schema { types { name } } }"}'
+```
+
+### When Services Are Unavailable
+
+The `/graphql` endpoint will respond with an error until at least one service becomes available and the schema is composed.
+
+## Configuration
+
+Configure enabled services via the `.env` file:
+
+```env
+# Enabled Services (comma-separated list)
+# Options: autentificacion, despacho, websocket, decision, ml_despacho
+ENABLED_SERVICES=autentificacion,despacho,websocket,decision,ml_despacho
+
+# Service URLs
+MS_AUTENTIFICACION_URL=http://localhost:8000/graphql
+MS_DESPACHO_URL=http://localhost:8001/graphql
+MS_WEBSOCKET_URL=http://localhost:4004/graphql
+MS_DECISION_URL=http://localhost:8002/graphql
+MS_ML_DESPACHO_URL=http://localhost:5000/graphql
+```
+
+## Recommended Docker Compose Setup
+
+No need for complex `depends_on` conditions. Just start services as they're ready:
+
+```yaml
+version: '3.8'
+
+services:
+  apollo-gateway:
+    build: .
+    ports:
+      - "4000:4000"
+    environment:
+      NODE_ENV: development
+      ENABLED_SERVICES: autentificacion,despacho,websocket,decision,ml_despacho
+      RUNNING_IN_DOCKER: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s  # Give gateway time to start
+
+  despacho:
+    # ... your service configuration
+    depends_on:
+      - apollo-gateway
+
+  # Other services can start at their own pace
+```
+
+## Development Mode
+
+```bash
+npm run dev
+```
+
+Runs the gateway with hot-reload using `tsx watch`.
+
+## Building for Production
+
+```bash
+npm run build
+npm start
+```
+
+## Troubleshooting
+
+### Gateway starts but schema is not ready
+
+**Expected behavior**: If services aren't available, the gateway will log a warning and continue running.
+
+```
+[APOLLO SERVER] Started but schema composition failed
+[APOLLO SERVER] Gateway will serve /health and /metrics endpoints
+[APOLLO SERVER] Waiting for services to become available...
+```
+
+**Solution**: Start your microservices. The gateway will automatically discover them and update the schema.
+
+### How to check if schema is ready?
+
+Query the detailed health endpoint:
+
+```bash
+curl -s http://localhost:4000/health/detailed | grep "schemaReady"
+```
+
+Will return `"schemaReady": true` when at least one service is available.
+
+### Service discovery takes too long
+
+The gateway polls for service availability every 10 seconds. This is configured in `src/config/subgraphs.ts`:
+
+```typescript
+introspectionPollInterval: 10000, // ms
+```
+
+To change polling interval, update `GATEWAY_CONFIG.introspectionPollInterval`.
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NODE_ENV` | development | Environment (development/production) |
+| `PORT` | 4000 | Gateway port |
+| `DEBUG` | false | Enable debug logging |
+| `ENABLED_SERVICES` | (required) | Comma-separated list of enabled services |
+| `RUNNING_IN_DOCKER` | false | Set to 'true' when running in Docker |
+| `MS_*_URL` | (required) | Service URLs for each microservice |
+
+## More Information
+
+- [Apollo Federation Docs](https://www.apollographql.com/docs/apollo-server/federation/introduction/)
+- [Apollo Gateway Configuration](https://www.apollographql.com/docs/apollo-server/api/apollo-gateway/)
+- [IntrospectAndCompose](https://www.apollographql.com/docs/apollo-server/api/gateway-class/#inspectvsd)

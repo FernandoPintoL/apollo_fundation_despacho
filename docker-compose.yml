@@ -1,29 +1,9 @@
 services:
   # ============================================
-  # Redis - Message Broker para eventos
-  # ============================================
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    restart: unless-stopped
-    networks:
-      - swii-network
-    volumes:
-      - redis-data:/data
-
-  # ============================================
   # Apollo Gateway - SOLO GATEWAY
   # Los microservicios corren localmente en tu máquina
   # Las BDs usan tu PostgreSQL local en 5432 y 5433
+  # Redis compartido: usa el swii-redis del proyecto principal
   # ============================================
   apollo-gateway:
     build:
@@ -49,7 +29,8 @@ services:
       JWT_SECRET: jwt-secret-change-in-production
 
       # Redis Configuration (para eventos)
-      REDIS_HOST: redis
+      # Conectar al Redis compartido que corre en el host
+      REDIS_HOST: host.docker.internal
       REDIS_PORT: 6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
 
@@ -64,10 +45,9 @@ services:
       start_period: 90s
 
     restart: unless-stopped
+    networks:
+      - bridge
 
 networks:
-  swii-network:
+  bridge:
     driver: bridge
-
-volumes:
-  redis-data:

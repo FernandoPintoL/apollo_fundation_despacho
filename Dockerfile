@@ -43,6 +43,9 @@ RUN npm ci --only=production
 # Copiar código compilado desde builder
 COPY --from=builder /app/dist ./dist
 
+# Copiar archivo .env para configuración de servicios en Docker
+COPY .env ./
+
 # Crear usuario no-root para seguridad
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
